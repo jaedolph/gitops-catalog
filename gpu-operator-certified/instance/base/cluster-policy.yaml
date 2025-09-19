@@ -13,6 +13,8 @@ spec:
     defaultWorkload: container
   driver:
     enabled: true
+    useNvidiaDriverCRD: false
+    kernelModuleType: auto
     upgradePolicy:
       autoUpgrade: true
       drain:
@@ -33,7 +35,7 @@ spec:
     certConfig:
       name: ''
     licensingConfig:
-      nlsEnabled: false
+      nlsEnabled: true
       configMapName: ''
     virtualTopology:
       config: ''
@@ -42,7 +44,7 @@ spec:
   dcgmExporter:
     enabled: true
     config:
-      name: 'console-plugin-nvidia-gpu'
+      name: ''
     serviceMonitor:
       enabled: true
   dcgm:
@@ -51,15 +53,13 @@ spec:
     updateStrategy: RollingUpdate
     rollingUpdate:
       maxUnavailable: '1'
-    tolerations:
-      - effect: NoSchedule
-        key: nvidia-gpu-only
-        operator: Exists
   devicePlugin:
     enabled: true
     config:
       name: ''
       default: ''
+    mps:
+      root: /run/nvidia/mps
   gfd:
     enabled: true
   migManager:
@@ -72,9 +72,7 @@ spec:
     enabled: true
   validator:
     plugin:
-      env:
-        - name: WITH_WORKLOAD
-          value: 'true'
+      env: []
   vgpuManager:
     enabled: false
   vgpuDeviceManager:
@@ -84,4 +82,6 @@ spec:
   vfioManager:
     enabled: true
   gds:
+    enabled: false
+  gdrcopy:
     enabled: false
