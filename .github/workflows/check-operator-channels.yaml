@@ -45,7 +45,7 @@ jobs:
           opm version
 
       - name: Install yq
-        uses: mikefarah/yq@1957ff45ed555eebe8206ba50c0e5e7800253783 # master
+        uses: mikefarah/yq@c14f446382944492701b16c1ddb48bb9dbe683e3 # v4.53.6
 
       - name: Authenticate to Red Hat registry
         run: |
@@ -110,7 +110,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install yq
-        uses: mikefarah/yq@1957ff45ed555eebe8206ba50c0e5e7800253783 # master
+        uses: mikefarah/yq@c14f446382944492701b16c1ddb48bb9dbe683e3 # v4.53.6
 
       - name: Download catalog cache
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8

@@ -177,7 +177,7 @@ get_operator_name() {
 #   patch-channel.yaml - a JSON patch that sets spec.channel on the Subscription
 create_overlay() {
   local sub_file="$1"
-  local pkg_name="$2"
+  local sub_name="$2"
   local channel="$3"
 
   local overlay_dir
@@ -196,7 +196,7 @@ resources:
 patches:
   - target:
       kind: Subscription
-      name: ${pkg_name}
+      name: ${sub_name}
     path: patch-channel.yaml
 YAML
 
@@ -245,8 +245,9 @@ process_operator() {
     return
   fi
 
-  # Read the OLM package name and catalog source from the Subscription spec
-  local pkg_name catalog_source
+  # Read the Subscription metadata and spec fields
+  local sub_name pkg_name catalog_source
+  sub_name="$(yq '.metadata.name' "$sub_file")"
   pkg_name="$(yq '.spec.name' "$sub_file")"
   catalog_source="$(yq '.spec.source' "$sub_file")"
 
@@ -307,7 +308,7 @@ process_operator() {
     if [[ "$MODE" == "generate" ]]; then
       while IFS= read -r channel; do
         [[ -z "$channel" ]] && continue
-        create_overlay "$sub_file" "$pkg_name" "$channel"
+        create_overlay "$sub_file" "$sub_name" "$channel"
       done <<<"$missing_channels"
     fi
   fi
