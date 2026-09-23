@@ -15,10 +15,15 @@ on:  # yamllint disable-line rule:truthy
           - report
           - generate
         default: report
+      ignore_missing:
+        description: 'Skip operators not found in any catalog instead of failing'
+        type: boolean
+        default: false
 
 env:
   OCP_VERSIONS: ${{ inputs.ocp_versions || 'v4.18 v4.19 v4.20 v4.21 v4.22' }}
   OPM_VERSION: v1.47.0
+  IGNORE_MISSING: ${{ inputs.ignore_missing == true || github.event_name == 'schedule' }}
 
 jobs:
   check-channels:

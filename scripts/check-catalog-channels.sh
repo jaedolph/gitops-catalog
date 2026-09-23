@@ -8,6 +8,8 @@ MODE="${1:-report}" # report | generate | list
 CATALOG_CACHE_DIR="${CATALOG_CACHE_DIR:-}"
 OPERATOR_FILTER="${OPERATOR_FILTER:-}"
 HAS_CHANGES=false
+ERRORS=false
+IGNORE_MISSING="${IGNORE_MISSING:-false}"
 
 usage() {
   cat <<EOF
@@ -27,6 +29,7 @@ Environment variables:
   CATALOG_CACHE_DIR  Directory containing pre-rendered catalog JSON files named
                      <catalog>-<version>.json (skip opm render)
   OPERATOR_FILTER    If set, only process the operator with this name
+  IGNORE_MISSING     If true, skip operators not found in any catalog instead of erroring (default: false)
 
 Requires: opm, yq, jq
 EOF
@@ -209,6 +212,12 @@ process_operator() {
     [[ "$catalog_source" == "$catalog" ]] && is_tracked=true && break
   done
   if [[ "$is_tracked" == "false" ]]; then
+    if [[ "$IGNORE_MISSING" == "true" ]]; then
+      echo "SKIP: ${operator_name} references untracked catalog source '${catalog_source}'" >&2
+    else
+      echo "ERROR: ${operator_name} references unknown catalog source '${catalog_source}' (tracked: ${CATALOGS})" >&2
+      ERRORS=true
+    fi
     return
   fi
 
@@ -216,6 +225,12 @@ process_operator() {
   catalog_channels="$(get_catalog_channels "$pkg_name" "$catalog_source")"
 
   if [[ -z "$catalog_channels" ]]; then
+    if [[ "$IGNORE_MISSING" == "true" ]]; then
+      echo "SKIP: ${operator_name} package '${pkg_name}' not found in any ${catalog_source} index" >&2
+    else
+      echo "ERROR: ${operator_name} package '${pkg_name}' not found in any ${catalog_source} index (${OCP_VERSIONS})" >&2
+      ERRORS=true
+    fi
     return
   fi
 
@@ -296,6 +311,11 @@ main() {
     [[ -z "$sub_file" ]] && continue
     process_operator "$sub_file"
   done < <(find_subscription_dirs | sort -u)
+
+  if [[ "$ERRORS" == "true" ]]; then
+    echo "Errors were found — see above." >&2
+    exit 1
+  fi
 
   if [[ "$HAS_CHANGES" == "false" ]]; then
     echo "All operators are up to date — no missing or stale channel overlays found." >&2
