@@ -1,4 +1,13 @@
 #!/usr/bin/env bash
+#
+# Compares OLM (Operator Lifecycle Manager) channel overlays in this repo
+# against the channels actually published in Red Hat catalog indices.
+#
+# Each operator in the repo has a base Subscription plus per-channel overlay
+# directories under overlays/. This script detects overlays that are missing
+# (channel exists in the catalog but not in the repo) or stale (overlay exists
+# but the channel was removed from every supported OCP version's catalog).
+#
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -36,6 +45,8 @@ EOF
 }
 
 check_prereqs() {
+  # opm is only required when rendering live from the registry;
+  # cached JSON files (CATALOG_CACHE_DIR) bypass the opm dependency.
   local missing=()
   for cmd in jq yq; do
     command -v "$cmd" &>/dev/null || missing+=("$cmd")
@@ -49,12 +60,19 @@ check_prereqs() {
   fi
 }
 
+# Derives the registry image path from a catalog name.
+# e.g. "redhat-operators" -> "registry.redhat.io/redhat/redhat-operator-index"
+#      "certified-operators" -> "registry.redhat.io/redhat/certified-operator-index"
 get_catalog_image_base() {
   local catalog="$1"
   local index_name="${catalog%-operators}-operator-index"
   echo "registry.redhat.io/redhat/${index_name}"
 }
 
+# Extracts channel metadata from a single catalog+version combination.
+# Uses cached JSON if CATALOG_CACHE_DIR is set; otherwise renders the
+# catalog image live with `opm render` and filters for olm.channel entries.
+# Output: one JSON object per line with {package, name, source}.
 extract_channel_data_for_catalog_version() {
   local catalog="$1"
   local version="$2"
@@ -74,6 +92,9 @@ extract_channel_data_for_catalog_version() {
   fi
 }
 
+# Collects channel data across all catalog×version combinations and
+# deduplicates. A channel present in multiple OCP versions appears only once
+# in the output — we care about the union of channels across all versions.
 extract_all_channel_data() {
   local combined=""
   for catalog in ${CATALOGS}; do
@@ -91,6 +112,8 @@ extract_all_channel_data() {
   echo "$combined" | sort -u
 }
 
+# Filters the pre-loaded CHANNEL_DATA for a specific operator package and
+# catalog source, returning the sorted list of channel names.
 get_catalog_channels() {
   local pkg_name="$1"
   local source="$2"
@@ -98,6 +121,11 @@ get_catalog_channels() {
     'select(.package == $pkg and .source == $src) | .name' | sort -u
 }
 
+# Locates all subscription.yaml files in the repo.
+# Supports two directory layouts:
+#   <operator>/operator/base/subscription.yaml  (nested operator/ structure)
+#   <operator>/base/subscription.yaml            (flat structure)
+# The second pass skips paths already matched by the first to avoid duplicates.
 find_subscription_dirs() {
   find "${REPO_ROOT}" -maxdepth 4 -path '*/operator/base/subscription.yaml' -type f 2>/dev/null
 
@@ -108,6 +136,8 @@ find_subscription_dirs() {
     done
 }
 
+# Resolves the overlays/ directory for a given subscription.yaml,
+# navigating up to the operator root regardless of nesting depth.
 get_overlay_dir() {
   local sub_file="$1"
   if [[ "$sub_file" == */operator/base/subscription.yaml ]]; then
@@ -119,6 +149,7 @@ get_overlay_dir() {
   fi
 }
 
+# Lists the names of existing overlay subdirectories (each one maps to a channel).
 get_existing_overlays() {
   local overlay_dir="$1"
   if [[ -d "$overlay_dir" ]]; then
@@ -126,6 +157,8 @@ get_existing_overlays() {
   fi
 }
 
+# Extracts the top-level operator directory name from a subscription path.
+# Accounts for both nested (operator/base/) and flat (base/) layouts.
 get_operator_name() {
   local sub_file="$1"
   if [[ "$sub_file" == */operator/base/subscription.yaml ]]; then
@@ -135,6 +168,9 @@ get_operator_name() {
   fi
 }
 
+# Creates a new channel overlay directory with two files:
+#   kustomization.yaml - references the base and applies the channel patch
+#   patch-channel.yaml - a JSON patch that sets spec.channel on the Subscription
 create_overlay() {
   local sub_file="$1"
   local pkg_name="$2"
@@ -169,6 +205,7 @@ YAML
   echo "    CREATED: ${channel_dir#"${REPO_ROOT}/"}"
 }
 
+# Removes a stale channel overlay directory entirely.
 remove_overlay() {
   local sub_file="$1"
   local channel="$2"
@@ -183,7 +220,8 @@ remove_overlay() {
   fi
 }
 
-# Names that are overlays in the repo but not real OLM channels
+# Overlay names that exist by convention but don't correspond to actual OLM
+# channel names in the catalog. These are excluded from missing/stale checks.
 SPECIAL_OVERLAYS="latest default"
 
 is_special_overlay() {
@@ -194,6 +232,11 @@ is_special_overlay() {
   return 1
 }
 
+# Processes a single operator: reads its Subscription to determine the OLM
+# package name and catalog source, fetches the available channels from the
+# pre-loaded catalog data, and compares them against existing overlays.
+# In "report" mode, prints differences; in "generate" mode, creates/removes
+# overlay directories; in "list" mode, outputs the operator name if changed.
 process_operator() {
   local sub_file="$1"
   local operator_name
@@ -203,10 +246,12 @@ process_operator() {
     return
   fi
 
+  # Read the OLM package name and catalog source from the Subscription spec
   local pkg_name catalog_source
   pkg_name="$(yq '.spec.name' "$sub_file")"
   catalog_source="$(yq '.spec.source' "$sub_file")"
 
+  # Verify the operator's catalog source is one we're tracking
   local is_tracked=false
   for catalog in ${CATALOGS}; do
     [[ "$catalog_source" == "$catalog" ]] && is_tracked=true && break
@@ -238,7 +283,8 @@ process_operator() {
   overlay_dir="$(get_overlay_dir "$sub_file")"
   existing_overlays="$(get_existing_overlays "$overlay_dir")"
 
-  # Filter special overlay names from both comparisons
+  # Exclude special overlays (e.g. "latest", "default") so they aren't
+  # flagged as stale when they don't match any real catalog channel name.
   local filtered_existing=""
   while IFS= read -r overlay; do
     [[ -z "$overlay" ]] && continue
@@ -246,6 +292,8 @@ process_operator() {
     filtered_existing="${filtered_existing:+${filtered_existing}$'\n'}${overlay}"
   done <<<"$existing_overlays"
 
+  # comm -23: lines only in catalog (missing overlays we need to create)
+  # comm -13: lines only in repo (stale overlays no longer in any catalog)
   local missing_channels stale_channels
   missing_channels="$(comm -23 <(echo "$catalog_channels") <(echo "$filtered_existing") 2>/dev/null || true)"
   stale_channels="$(comm -13 <(echo "$catalog_channels") <(echo "$filtered_existing") 2>/dev/null || true)"
@@ -302,11 +350,15 @@ main() {
   echo "Mode: ${MODE}" >&2
   echo "" >&2
 
+  # Phase 1: Build the complete channel dataset upfront so per-operator
+  # lookups are fast jq filters against an in-memory string.
   echo "Extracting channel data from catalog indices..." >&2
   CHANNEL_DATA="$(extract_all_channel_data)"
   echo "Done. Checking operators..." >&2
   echo "" >&2
 
+  # Phase 2: Walk every Subscription in the repo and compare its overlays
+  # against the catalog data.
   while IFS= read -r sub_file; do
     [[ -z "$sub_file" ]] && continue
     process_operator "$sub_file"
