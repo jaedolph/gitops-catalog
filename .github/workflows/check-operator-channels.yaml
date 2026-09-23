@@ -35,7 +35,7 @@ jobs:
       contents: read
     steps:
       - name: Code Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install opm
         run: |
@@ -107,7 +107,7 @@ jobs:
       max-parallel: 5
     steps:
       - name: Code Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install yq
         uses: mikefarah/yq@1957ff45ed555eebe8206ba50c0e5e7800253783 # master
