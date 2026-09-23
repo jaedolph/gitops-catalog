@@ -19,6 +19,7 @@ OPERATOR_FILTER="${OPERATOR_FILTER:-}"
 HAS_CHANGES=false
 ERRORS=false
 IGNORE_MISSING="${IGNORE_MISSING:-false}"
+MISSING_CATALOG_MSGS=()
 IGNORED_OPERATORS="${IGNORED_OPERATORS:-rhoda-operator}"
 
 usage() {
@@ -256,9 +257,9 @@ process_operator() {
   done
   if [[ "$is_tracked" == "false" ]]; then
     if [[ "$IGNORE_MISSING" == "true" ]]; then
-      echo "SKIP: ${operator_name} references untracked catalog source '${catalog_source}'" >&2
+      MISSING_CATALOG_MSGS+=("SKIP: ${operator_name} references untracked catalog source '${catalog_source}'")
     else
-      echo "ERROR: ${operator_name} references unknown catalog source '${catalog_source}' (tracked: ${CATALOGS})" >&2
+      MISSING_CATALOG_MSGS+=("ERROR: ${operator_name} references unknown catalog source '${catalog_source}' (tracked: ${CATALOGS})")
       ERRORS=true
     fi
     return
@@ -269,9 +270,9 @@ process_operator() {
 
   if [[ -z "$catalog_channels" ]]; then
     if [[ "$IGNORE_MISSING" == "true" ]]; then
-      echo "SKIP: ${operator_name} package '${pkg_name}' not found in any ${catalog_source} index" >&2
+      MISSING_CATALOG_MSGS+=("SKIP: ${operator_name} package '${pkg_name}' not found in any ${catalog_source} index")
     else
-      echo "ERROR: ${operator_name} package '${pkg_name}' not found in any ${catalog_source} index (${OCP_VERSIONS})" >&2
+      MISSING_CATALOG_MSGS+=("ERROR: ${operator_name} package '${pkg_name}' not found in any ${catalog_source} index (${OCP_VERSIONS})")
       ERRORS=true
     fi
     return
@@ -350,6 +351,14 @@ main() {
     [[ -z "$sub_file" ]] && continue
     process_operator "$sub_file"
   done < <(find_subscription_dirs | sort -u)
+
+  if [[ ${#MISSING_CATALOG_MSGS[@]} -gt 0 ]]; then
+    echo "Operators not found in catalog sources:" >&2
+    for msg in "${MISSING_CATALOG_MSGS[@]}"; do
+      echo "  ${msg}" >&2
+    done
+    echo "" >&2
+  fi
 
   if [[ "$ERRORS" == "true" ]]; then
     echo "Errors were found — see above." >&2
