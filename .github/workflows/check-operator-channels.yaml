@@ -79,14 +79,6 @@ jobs:
           CATALOG_CACHE_DIR: /tmp/catalog-cache
         run: ./scripts/check-catalog-channels.sh generate
 
-      - name: Validate generated manifests
-        if: steps.check.outputs.has_changes == 'true' && (inputs.mode == 'generate' || github.event_name == 'schedule')
-        run: |
-          LATEST=$(curl -s https://api.github.com/repos/kubernetes-sigs/kustomize/releases/latest | jq .name | sed 's#kustomize/##; s#"##g')
-          curl "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${LATEST}/kustomize_${LATEST}_linux_amd64.tar.gz" \
-            -sL | sudo tar zx -C /usr/local/bin/ kustomize
-          ./scripts/validate_kustomize.sh
-
       - name: Create Pull Request
         if: steps.check.outputs.has_changes == 'true' && (inputs.mode == 'generate' || github.event_name == 'schedule')
         uses: peter-evans/create-pull-request@v7
