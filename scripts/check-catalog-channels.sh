@@ -157,10 +157,11 @@ remove_overlay() {
   local overlay_dir
   overlay_dir="$(get_overlay_dir "$sub_file")"
   local channel_dir="${overlay_dir}/${channel}"
+  local rel_path="${channel_dir#"${REPO_ROOT}/"}"
 
   if [[ -d "${channel_dir}" ]]; then
     rm -rf "${channel_dir}"
-    echo "    REMOVED: ${channel_dir#"${REPO_ROOT}/"}"
+    echo "    REMOVED: ${rel_path}"
   fi
 }
 
