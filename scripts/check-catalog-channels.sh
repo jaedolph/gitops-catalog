@@ -19,6 +19,7 @@ OPERATOR_FILTER="${OPERATOR_FILTER:-}"
 HAS_CHANGES=false
 ERRORS=false
 IGNORE_MISSING="${IGNORE_MISSING:-false}"
+IGNORED_OPERATORS="${IGNORED_OPERATORS:-rhoda-operator}"
 
 usage() {
   cat <<EOF
@@ -39,6 +40,8 @@ Environment variables:
                      <catalog>-<version>.json (skip opm render)
   OPERATOR_FILTER    If set, only process the operator with this name
   IGNORE_MISSING     If true, skip operators not found in any catalog instead of erroring (default: false)
+  IGNORED_OPERATORS  Space-separated list of operator directory names to skip entirely,
+                     e.g. operators that use a custom CatalogSource (default: rhoda-operator)
 
 Requires: opm, yq, jq
 EOF
@@ -220,18 +223,6 @@ remove_overlay() {
   fi
 }
 
-# Overlay names that exist by convention but don't correspond to actual OLM
-# channel names in the catalog. These are excluded from missing/stale checks.
-SPECIAL_OVERLAYS="latest default"
-
-is_special_overlay() {
-  local name="$1"
-  for special in ${SPECIAL_OVERLAYS}; do
-    [[ "$name" == "$special" ]] && return 0
-  done
-  return 1
-}
-
 # Processes a single operator: reads its Subscription to determine the OLM
 # package name and catalog source, fetches the available channels from the
 # pre-loaded catalog data, and compares them against existing overlays.
@@ -241,6 +232,13 @@ process_operator() {
   local sub_file="$1"
   local operator_name
   operator_name="$(get_operator_name "$sub_file")"
+
+  for ignored in ${IGNORED_OPERATORS}; do
+    if [[ "$operator_name" == "$ignored" ]]; then
+      echo "SKIP: ${operator_name} (in IGNORED_OPERATORS)" >&2
+      return
+    fi
+  done
 
   if [[ -n "$OPERATOR_FILTER" && "$operator_name" != "$OPERATOR_FILTER" ]]; then
     return
@@ -283,20 +281,9 @@ process_operator() {
   overlay_dir="$(get_overlay_dir "$sub_file")"
   existing_overlays="$(get_existing_overlays "$overlay_dir")"
 
-  # Exclude special overlays (e.g. "latest", "default") so they aren't
-  # flagged as stale when they don't match any real catalog channel name.
-  local filtered_existing=""
-  while IFS= read -r overlay; do
-    [[ -z "$overlay" ]] && continue
-    is_special_overlay "$overlay" && continue
-    filtered_existing="${filtered_existing:+${filtered_existing}$'\n'}${overlay}"
-  done <<<"$existing_overlays"
-
-  # comm -23: lines only in catalog (missing overlays we need to create)
-  # comm -13: lines only in repo (stale overlays no longer in any catalog)
   local missing_channels stale_channels
-  missing_channels="$(comm -23 <(echo "$catalog_channels") <(echo "$filtered_existing") 2>/dev/null || true)"
-  stale_channels="$(comm -13 <(echo "$catalog_channels") <(echo "$filtered_existing") 2>/dev/null || true)"
+  missing_channels="$(comm -23 <(echo "$catalog_channels") <(echo "$existing_overlays") 2>/dev/null || true)"
+  stale_channels="$(comm -13 <(echo "$catalog_channels") <(echo "$existing_overlays") 2>/dev/null || true)"
 
   # Nothing to report
   if [[ -z "$missing_channels" && -z "$stale_channels" ]]; then
