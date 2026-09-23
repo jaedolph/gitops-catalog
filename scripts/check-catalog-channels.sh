@@ -3,27 +3,30 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OCP_VERSIONS="${OCP_VERSIONS:-v4.18 v4.19 v4.20 v4.21 v4.22}"
-CATALOG_IMAGE_BASE="${CATALOG_IMAGE_BASE:-registry.redhat.io/redhat/redhat-operator-index}"
-MODE="${1:-report}" # report | generate
+CATALOGS="${CATALOGS:-redhat-operators certified-operators community-operators}"
+MODE="${1:-report}" # report | generate | list
 CATALOG_CACHE_DIR="${CATALOG_CACHE_DIR:-}"
+OPERATOR_FILTER="${OPERATOR_FILTER:-}"
 HAS_CHANGES=false
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [report|generate]
+Usage: $(basename "$0") [report|generate|list]
 
-Compares OLM channels available across multiple Red Hat operator catalog index
-versions against existing overlay directories in this repository.
+Compares OLM channels available across Red Hat, Certified, and Community
+operator catalog indices against existing overlay directories in this repository.
 
 Channels present in any supported version but missing from the repo are reported
 as missing. Existing overlays not present in any supported version are reported
-as stale and removed in 'generate' mode.
+as stale and removed in 'generate' mode. The 'list' mode outputs only the names
+of operators that have changes (one per line), for use in CI matrix strategies.
 
 Environment variables:
   OCP_VERSIONS       Space-separated list of OCP versions (default: v4.18 v4.19 v4.20 v4.21 v4.22)
-  CATALOG_IMAGE_BASE Base image path (default: registry.redhat.io/redhat/redhat-operator-index)
+  CATALOGS           Space-separated catalog sources (default: redhat-operators certified-operators community-operators)
   CATALOG_CACHE_DIR  Directory containing pre-rendered catalog JSON files named
-                     <version>.json (skip opm render)
+                     <catalog>-<version>.json (skip opm render)
+  OPERATOR_FILTER    If set, only process the operator with this name
 
 Requires: opm, yq, jq
 EOF
@@ -43,40 +46,53 @@ check_prereqs() {
   fi
 }
 
-extract_channel_data_for_version() {
-  local version="$1"
-  local cache_file="${CATALOG_CACHE_DIR:+${CATALOG_CACHE_DIR}/${version}.json}"
+get_catalog_image_base() {
+  local catalog="$1"
+  local index_name="${catalog%-operators}-operator-index"
+  echo "registry.redhat.io/redhat/${index_name}"
+}
+
+extract_channel_data_for_catalog_version() {
+  local catalog="$1"
+  local version="$2"
+  local cache_file="${CATALOG_CACHE_DIR:+${CATALOG_CACHE_DIR}/${catalog}-${version}.json}"
 
   if [[ -n "${cache_file}" && -f "${cache_file}" ]]; then
     echo "  Using cached data: ${cache_file}" >&2
     cat "${cache_file}"
   else
-    local image="${CATALOG_IMAGE_BASE}:${version}"
+    local image_base
+    image_base="$(get_catalog_image_base "$catalog")"
+    local image="${image_base}:${version}"
     echo "  Rendering ${image}..." >&2
     opm render "${image}" |
-      jq -c 'select(.schema == "olm.channel") | {package, name}'
+      jq -c --arg src "$catalog" \
+        'select(.schema == "olm.channel") | {package, name, source: $src}'
   fi
 }
 
 extract_all_channel_data() {
   local combined=""
-  for version in ${OCP_VERSIONS}; do
-    echo "Processing catalog index ${version}..." >&2
-    local version_data
-    version_data="$(extract_channel_data_for_version "$version")"
-    if [[ -n "$combined" ]]; then
-      combined="${combined}"$'\n'"${version_data}"
-    else
-      combined="${version_data}"
-    fi
+  for catalog in ${CATALOGS}; do
+    for version in ${OCP_VERSIONS}; do
+      echo "Processing ${catalog} ${version}..." >&2
+      local version_data
+      version_data="$(extract_channel_data_for_catalog_version "$catalog" "$version")"
+      if [[ -n "$combined" ]]; then
+        combined="${combined}"$'\n'"${version_data}"
+      else
+        combined="${version_data}"
+      fi
+    done
   done
   echo "$combined" | sort -u
 }
 
 get_catalog_channels() {
   local pkg_name="$1"
-  echo "${CHANNEL_DATA}" | jq -r --arg pkg "$pkg_name" \
-    'select(.package == $pkg) | .name' | sort -u
+  local source="$2"
+  echo "${CHANNEL_DATA}" | jq -r --arg pkg "$pkg_name" --arg src "$source" \
+    'select(.package == $pkg and .source == $src) | .name' | sort -u
 }
 
 find_subscription_dirs() {
@@ -180,16 +196,24 @@ process_operator() {
   local operator_name
   operator_name="$(get_operator_name "$sub_file")"
 
+  if [[ -n "$OPERATOR_FILTER" && "$operator_name" != "$OPERATOR_FILTER" ]]; then
+    return
+  fi
+
   local pkg_name catalog_source
   pkg_name="$(yq '.spec.name' "$sub_file")"
   catalog_source="$(yq '.spec.source' "$sub_file")"
 
-  if [[ "$catalog_source" != "redhat-operators" ]]; then
+  local is_tracked=false
+  for catalog in ${CATALOGS}; do
+    [[ "$catalog_source" == "$catalog" ]] && is_tracked=true && break
+  done
+  if [[ "$is_tracked" == "false" ]]; then
     return
   fi
 
   local catalog_channels
-  catalog_channels="$(get_catalog_channels "$pkg_name")"
+  catalog_channels="$(get_catalog_channels "$pkg_name" "$catalog_source")"
 
   if [[ -z "$catalog_channels" ]]; then
     return
@@ -217,6 +241,12 @@ process_operator() {
   fi
 
   HAS_CHANGES=true
+
+  if [[ "$MODE" == "list" ]]; then
+    echo "$operator_name"
+    return
+  fi
+
   echo "${operator_name} (package: ${pkg_name})"
   echo "  catalog channels:  $(echo "$catalog_channels" | tr '\n' ' ')"
   echo "  existing overlays: $(echo "$existing_overlays" | tr '\n' ' ')"
@@ -252,14 +282,15 @@ main() {
 
   check_prereqs
 
-  echo "Supported OCP versions: ${OCP_VERSIONS}"
-  echo "Mode: ${MODE}"
-  echo ""
+  echo "Supported OCP versions: ${OCP_VERSIONS}" >&2
+  echo "Catalogs: ${CATALOGS}" >&2
+  echo "Mode: ${MODE}" >&2
+  echo "" >&2
 
-  echo "Extracting channel data from catalog indices..."
+  echo "Extracting channel data from catalog indices..." >&2
   CHANNEL_DATA="$(extract_all_channel_data)"
-  echo "Done. Checking operators..."
-  echo ""
+  echo "Done. Checking operators..." >&2
+  echo "" >&2
 
   while IFS= read -r sub_file; do
     [[ -z "$sub_file" ]] && continue
@@ -267,7 +298,7 @@ main() {
   done < <(find_subscription_dirs | sort -u)
 
   if [[ "$HAS_CHANGES" == "false" ]]; then
-    echo "All operators are up to date — no missing or stale channel overlays found."
+    echo "All operators are up to date — no missing or stale channel overlays found." >&2
   fi
 }
 

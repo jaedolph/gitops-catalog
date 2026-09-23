@@ -9,7 +9,7 @@ on:  # yamllint disable-line rule:truthy
         description: 'Space-separated OCP versions (e.g., v4.18 v4.19 v4.20 v4.21 v4.22)'
         default: 'v4.18 v4.19 v4.20 v4.21 v4.22'
       mode:
-        description: 'report = dry run, generate = create PR with missing/stale overlays'
+        description: 'report = dry run, generate = create PRs with missing/stale overlays'
         type: choice
         options:
           - report
@@ -23,9 +23,10 @@ env:
 jobs:
   check-channels:
     runs-on: ubuntu-latest
+    outputs:
+      operators: ${{ steps.list.outputs.operators }}
     permissions:
-      contents: write
-      pull-requests: write
+      contents: read
     steps:
       - name: Code Checkout
         uses: actions/checkout@v4
@@ -48,61 +49,108 @@ jobs:
       - name: Render and cache catalog data
         run: |
           mkdir -p /tmp/catalog-cache
-          for version in ${OCP_VERSIONS}; do
-            image="registry.redhat.io/redhat/redhat-operator-index:${version}"
-            echo "Rendering catalog: ${image}"
-            opm render "${image}" | \
-              jq -c 'select(.schema == "olm.channel") | {package, name}' \
-              > "/tmp/catalog-cache/${version}.json"
-            echo "  ${version}: $(wc -l < "/tmp/catalog-cache/${version}.json") channel entries"
+          catalogs="redhat-operators certified-operators community-operators"
+          for catalog in ${catalogs}; do
+            index_name="${catalog%-operators}-operator-index"
+            for version in ${OCP_VERSIONS}; do
+              image="registry.redhat.io/redhat/${index_name}:${version}"
+              cache_file="/tmp/catalog-cache/${catalog}-${version}.json"
+              echo "Rendering catalog: ${image}"
+              opm render "${image}" | \
+                jq -c --arg src "${catalog}" \
+                  'select(.schema == "olm.channel") | {package, name, source: $src}' \
+                > "${cache_file}"
+              echo "  ${catalog} ${version}: $(wc -l < "${cache_file}") channel entries"
+            done
           done
 
-      - name: Check for missing and stale channel overlays
-        id: check
+      - name: Report
+        env:
+          CATALOG_CACHE_DIR: /tmp/catalog-cache
+        run: ./scripts/check-catalog-channels.sh report
+
+      - name: List operators with changes
+        id: list
         env:
           CATALOG_CACHE_DIR: /tmp/catalog-cache
         run: |
+          operators=$(./scripts/check-catalog-channels.sh list | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "operators=${operators}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload catalog cache
+        if: steps.list.outputs.operators != '[]'
+        uses: actions/upload-artifact@v4
+        with:
+          name: catalog-cache
+          path: /tmp/catalog-cache/
+          retention-days: 1
+
+  create-prs:
+    needs: check-channels
+    if: >-
+      needs.check-channels.outputs.operators != '[]' &&
+      (inputs.mode == 'generate' || github.event_name == 'schedule')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    strategy:
+      matrix:
+        operator: ${{ fromJson(needs.check-channels.outputs.operators) }}
+      fail-fast: false
+      max-parallel: 5
+    steps:
+      - name: Code Checkout
+        uses: actions/checkout@v4
+
+      - name: Install yq
+        uses: mikefarah/yq@master
+
+      - name: Download catalog cache
+        uses: actions/download-artifact@v4
+        with:
+          name: catalog-cache
+          path: /tmp/catalog-cache/
+
+      - name: Generate report
+        id: report
+        env:
+          CATALOG_CACHE_DIR: /tmp/catalog-cache
+          OPERATOR_FILTER: ${{ matrix.operator }}
+        run: |
           output=$(./scripts/check-catalog-channels.sh report)
-          echo "$output"
           echo "report<<EOF" >> "$GITHUB_OUTPUT"
           echo "$output" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
-          if echo "$output" | grep -qE "^  (missing|stale):"; then
-            echo "has_changes=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_changes=false" >> "$GITHUB_OUTPUT"
-          fi
 
       - name: Generate overlay changes
-        if: steps.check.outputs.has_changes == 'true' && (inputs.mode == 'generate' || github.event_name == 'schedule')
         env:
           CATALOG_CACHE_DIR: /tmp/catalog-cache
+          OPERATOR_FILTER: ${{ matrix.operator }}
         run: ./scripts/check-catalog-channels.sh generate
 
       - name: Create Pull Request
-        if: steps.check.outputs.has_changes == 'true' && (inputs.mode == 'generate' || github.event_name == 'schedule')
         uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "feat: sync operator channel overlays"
-          title: "feat: sync operator channel overlays"
+          commit-message: "feat(${{ matrix.operator }}): sync channel overlays"
+          title: "feat(${{ matrix.operator }}): sync channel overlays"
           body: |
-            ## Operator Channel Overlay Sync
+            ## Channel Overlay Sync: `${{ matrix.operator }}`
 
-            Compared OLM channels across supported Red Hat catalog indices
-            (`${{ env.OCP_VERSIONS }}`) against overlay directories in this
-            repository. Missing overlays were added and stale overlays (not
-            present in any supported version) were removed.
+            Compared OLM channels across supported Red Hat, Certified, and
+            Community catalog indices (`${{ env.OCP_VERSIONS }}`) against
+            overlay directories for `${{ matrix.operator }}`.
 
             <details>
             <summary>Full report</summary>
 
             ```
-            ${{ steps.check.outputs.report }}
+            ${{ steps.report.outputs.report }}
             ```
             </details>
 
             Generated by the weekly channel freshness check.
-          branch: automation/sync-channel-overlays
+          branch: automation/sync-channel-overlays/${{ matrix.operator }}
           labels: automation
           delete-branch: true
